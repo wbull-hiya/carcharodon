@@ -8,6 +8,7 @@ _carcharodon() {
     local commands="call status cancel timestamps numbers help"
     local global_opts="--json --quiet -q --help -h --version -v"
     local levels="ok uncertain spam fraud"
+    local trunks="flowroute telnyx bandwidth"
     local shorthands="ok uncertain spam fraud spam:telemarketer spam:robocaller spam:survey fraud:tax-scam fraud:extortion fraud:tech-support-scam"
 
     case "${prev}" in
@@ -16,7 +17,7 @@ _carcharodon() {
             return 0
             ;;
         call)
-            COMPREPLY=($(compgen -W "-t --to -f --from --cancel-after --wait --json --quiet -q" -- "${cur}"))
+            COMPREPLY=($(compgen -W "-t --to -f --from --trunk --cancel-after --wait --json --quiet -q" -- "${cur}"))
             return 0
             ;;
         status|cancel|timestamps)
@@ -42,6 +43,10 @@ _carcharodon() {
             ;;
         -l|--level)
             COMPREPLY=($(compgen -W "${levels}" -- "${cur}"))
+            return 0
+            ;;
+        --trunk)
+            COMPREPLY=($(compgen -W "${trunks}" -- "${cur}"))
             return 0
             ;;
         -c|--category)
@@ -71,7 +76,7 @@ _carcharodon() {
 
     case "${cmd}" in
         call)
-            COMPREPLY=($(compgen -W "-t --to -f --from --cancel-after --wait --json --quiet -q" -- "${cur}"))
+            COMPREPLY=($(compgen -W "-t --to -f --from --trunk --cancel-after --wait --json --quiet -q" -- "${cur}"))
             ;;
         status|cancel|timestamps)
             COMPREPLY=($(compgen -W "-i --id --json --quiet -q" -- "${cur}"))

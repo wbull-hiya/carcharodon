@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 API_BASE="${CARCHARODON_API_URL:-https://api.carcharodon.dev}"
 API_KEY="${CARCHARODON_API_KEY:-}"
 
@@ -186,11 +186,14 @@ check_api_key() {
 
 #######################################
 # Make API request with retry logic
+# Usage: api_request METHOD ENDPOINT [DATA] [EXTRA_HEADERS...]
 #######################################
 api_request() {
     local method="$1"
     local endpoint="$2"
     local data="${3:-}"
+    shift 3 2>/dev/null || shift $#
+    local extra_headers=("$@")
     local attempt=1
     local response
     local http_code
@@ -204,6 +207,11 @@ api_request() {
             -H "Authorization: Bearer $API_KEY"
             -H "Content-Type: application/json"
         )
+
+        # Add any extra headers
+        for header in "${extra_headers[@]}"; do
+            [[ -n "$header" ]] && curl_args+=(-H "$header")
+        done
 
         if [[ -n "$data" ]]; then
             curl_args+=(-d "$data")
@@ -538,6 +546,7 @@ cmd_call() {
     local to_number=""
     local from_number=""
     local cancel_after="35000"
+    local trunk=""
     local wait_for_complete=false
 
     while [[ $# -gt 0 ]]; do
@@ -554,6 +563,10 @@ cmd_call() {
                 cancel_after="$2"
                 shift 2
                 ;;
+            --trunk)
+                trunk="$2"
+                shift 2
+                ;;
             --wait)
                 wait_for_complete=true
                 shift
@@ -568,11 +581,23 @@ cmd_call() {
                 ;;
             *)
                 error "Unknown option: $1"
-                echo "Usage: carcharodon call -t <to> -f <from|shorthand> [--cancel-after <ms>] [--wait]" >&2
+                echo "Usage: carcharodon call -t <to> -f <from|shorthand> [--trunk <name>] [--cancel-after <ms>] [--wait]" >&2
                 exit 1
                 ;;
         esac
     done
+
+    # Validate trunk if specified
+    if [[ -n "$trunk" ]]; then
+        case "$trunk" in
+            flowroute|telnyx|bandwidth) ;;
+            *)
+                error "Invalid trunk: '$trunk'"
+                echo "  Valid trunks: flowroute, telnyx, bandwidth" >&2
+                exit 1
+                ;;
+        esac
+    fi
 
     if [[ -z "$to_number" ]]; then
         error "Missing required option: -t/--to"
@@ -603,10 +628,16 @@ cmd_call() {
         --arg to "$to_number" \
         --arg from "$from_number" \
         --argjson cancel "$cancel_after" \
-        '{to: $to, from: $from, cancelAfter: $cancel}')
+        '{to: $to, from: $from, cancel_after: $cancel}')
+
+    # Build extra headers
+    local extra_headers=()
+    if [[ -n "$trunk" ]]; then
+        extra_headers+=("Sip-Trunk: $trunk")
+    fi
 
     local response
-    response=$(api_request "POST" "/call" "$payload") || exit 1
+    response=$(api_request "POST" "/call" "$payload" "${extra_headers[@]}") || exit 1
 
     local call_id
     call_id=$(echo "$response" | jq -r '.id // .callId // empty')
@@ -626,6 +657,7 @@ cmd_call() {
         echo "  Call ID: $call_id"
         echo "  To: $to_number"
         echo "  From: $from_number"
+        [[ -n "$trunk" ]] && echo "  Trunk: $trunk"
     fi
 
     if [[ "$wait_for_complete" == "true" ]]; then
@@ -820,6 +852,9 @@ ${BOLD}EXAMPLES:${NC}
     carcharodon call -t +12065551234 -f fraud
     carcharodon call -t +12065551234 -f fraud:tax-scam
 
+    # Use a specific SIP trunk
+    carcharodon call -t +12065551234 -f spam --trunk telnyx
+
     # Place a call and wait for completion
     carcharodon call -t +12065551234 -f +18005551234 --wait
 
@@ -854,8 +889,14 @@ ${BOLD}ENVIRONMENT:${NC}
 ${BOLD}CALL OPTIONS:${NC}
     -t, --to <number>       Destination phone number (E.164 format)
     -f, --from <number>     Caller ID - E.164 number or shorthand (spam, fraud, etc.)
+    --trunk <name>          SIP trunk: flowroute (default), telnyx, bandwidth
     --cancel-after <ms>     Auto-cancel timeout in milliseconds (default: 35000)
     --wait                  Wait for call to complete before returning
+
+${BOLD}SIP TRUNKS:${NC}
+    flowroute               Default for US numbers
+    telnyx                  Alternative trunk
+    bandwidth               Auto-selected for UK (+44) numbers
 
 ${BOLD}STATUS/CANCEL/TIMESTAMPS OPTIONS:${NC}
     -i, --id <call_id>      Call ID to query

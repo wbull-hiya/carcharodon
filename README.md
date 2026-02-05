@@ -51,8 +51,22 @@ carcharodon call -t +12065551234 -f fraud:tax-scam
 Options:
 - `-t, --to` - Destination phone number (E.164 format, required)
 - `-f, --from` - Caller ID: E.164 number or shorthand like `spam`, `fraud:tax-scam` (required)
+- `--trunk <name>` - SIP trunk: `flowroute` (default), `telnyx`, `bandwidth`
 - `--cancel-after <ms>` - Auto-cancel timeout in milliseconds (default: 35000)
 - `--wait` - Wait for call to complete before returning
+
+### SIP Trunks
+
+| Trunk | Description |
+|-------|-------------|
+| `flowroute` | Default trunk for US numbers |
+| `telnyx` | Alternative trunk |
+| `bandwidth` | Auto-selected for UK (+44) numbers |
+
+```bash
+# Use a specific trunk
+carcharodon call -t +12065551234 -f spam --trunk telnyx
+```
 
 ### Test Number Shorthands
 

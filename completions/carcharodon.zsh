@@ -25,6 +25,9 @@ _carcharodon() {
     local -a levels
     levels=(ok uncertain spam fraud)
 
+    local -a trunks
+    trunks=(flowroute telnyx bandwidth)
+
     local -a shorthands
     shorthands=(
         'ok:Random OK number'
@@ -56,6 +59,7 @@ _carcharodon() {
                     _arguments \
                         '(-t --to)'{-t,--to}'[Destination phone number]:phone number:' \
                         '(-f --from)'{-f,--from}'[Caller ID or shorthand]:from number:((${(kv)shorthands}))' \
+                        '--trunk[SIP trunk to use]:trunk:(${trunks})' \
                         '--cancel-after[Auto-cancel timeout in ms]:milliseconds:(10000 20000 30000 35000 60000)' \
                         '--wait[Wait for call to complete]' \
                         '--json[Output raw JSON]' \
