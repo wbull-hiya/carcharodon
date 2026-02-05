@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 API_BASE="${CARCHARODON_API_URL:-https://api.carcharodon.dev}"
 API_KEY="${CARCHARODON_API_KEY:-}"
 
@@ -17,14 +17,18 @@ if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     GREEN='\033[0;32m'
     YELLOW='\033[0;33m'
     BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
     BOLD='\033[1m'
+    DIM='\033[2m'
     NC='\033[0m'
 else
     RED=''
     GREEN=''
     YELLOW=''
     BLUE=''
+    CYAN=''
     BOLD=''
+    DIM=''
     NC=''
 fi
 
@@ -35,6 +39,70 @@ QUIET_OUTPUT=false
 # Retry settings
 MAX_RETRIES=3
 RETRY_DELAY=2
+
+#######################################
+# Embedded test numbers database
+# Format: number|type|level|category|identity|description
+#######################################
+TEST_NUMBERS='
++14014008249|connect|||suppressed|cps: pre-auth warning
++15127461048|connect|||suppressed|cps: do not originate
++17865818702|connect|||suppressed|cps test: full profile
++19254754734|connect|||suppressed|cps: pre-auth block
++16505573867|override|ok|none|suppressed|
++17864225541|override|uncertain|none|suppressed|
++16613024569|override|uncertain|telemarketer|suppressed|
++19732734932|override|uncertain|survey|suppressed|
++19012214676|override|spam|survey|suppressed|
++17083180306|override|spam|robocaller|suppressed|
++15034107797|override|spam|nonprofit|suppressed|
++17862506692|override|spam|telemarketer|suppressed|
++16163595513|override|fraud|none|suppressed|
++16194340965|override|fraud|extortion|suppressed|
++17795482973|override|fraud|tax scam|suppressed|
++15039801231|override|fraud|tech support scam|suppressed|
++15074125952|override|fraud|scam or fraud|suppressed|
++17862506697|override|ok|none|hiya test number|
++16502273199|override|uncertain|none|hiya test number|
++16304571676|override|uncertain|survey|hiya test number|
++13364810806|override|spam|telemarketer|hiya test number|
++16505572500|override|fraud|scam or fraud|hiya test number|
++441599312031|override|ok|none|suppressed|UK
++441485205017|override|uncertain|none|suppressed|UK
++441750432049|override|uncertain|telemarketer|suppressed|UK
++441439377054|override|uncertain|survey|suppressed|UK
++441756802051|override|spam|none|suppressed|UK
++441792720368|override|spam|survey|suppressed|UK
++441677252010|override|spam|robocaller|suppressed|UK
++441789532065|override|spam|nonprofit|suppressed|UK
++441798422021|override|spam|telemarketer|suppressed|UK
++441368908042|override|fraud|none|suppressed|UK
++441764752037|override|fraud|extortion|suppressed|UK
++441786542064|override|fraud|tax scam|suppressed|UK
++441299382089|override|fraud|tech support scam|suppressed|UK
++441764752032|override|fraud|scam or fraud|suppressed|UK
++441756802041|override|ok|none|hiya test number|UK
++441749200173|override|uncertain|none|hiya test number|UK
++441756802047|override|spam|telemarketer|hiya test number|UK
++441456256030|override|fraud|scam or fraud|hiya test number|UK
++12065550175|override|fraud||business|
++12065550176|override|spam||unknown|
++12065550177|override|spam||business|
++12065550178|override|fraud||unknown|
++12065550179|override|fraud||unknown|
++12065550169|override|fraud||unknown|
++12065550110|override|ok||business|
++12065550101|override|ok||person|
++12065550111|override|ok||unknown|
++12065550120|override|uncertain||business|
++12065550121|override|uncertain||business|
++12065550130|override|uncertain||unknown|
++12065550145|override|uncertain||business|
++12065550148|override||||
++12065550149|override|uncertain||unknown|
++19991110006|override|uncertain||business|
++19005550170|override|fraud||unknown|
+'
 
 #######################################
 # Print error message to stderr
@@ -281,6 +349,189 @@ wait_for_call() {
 }
 
 #######################################
+# Get color for level
+#######################################
+level_color() {
+    local level="$1"
+    case "$level" in
+        ok) echo "$GREEN" ;;
+        uncertain) echo "$YELLOW" ;;
+        spam) echo "$YELLOW" ;;
+        fraud) echo "$RED" ;;
+        *) echo "$NC" ;;
+    esac
+}
+
+#######################################
+# Resolve shorthand to phone number
+# Supports: spam, fraud, ok, uncertain
+# And: fraud:tax-scam, spam:robocaller, etc.
+#######################################
+resolve_number_shorthand() {
+    local shorthand="$1"
+    local level=""
+    local category=""
+
+    # Check if it's already a phone number
+    if [[ "$shorthand" =~ ^\+ ]]; then
+        echo "$shorthand"
+        return 0
+    fi
+
+    # Parse level:category format
+    if [[ "$shorthand" == *:* ]]; then
+        level="${shorthand%%:*}"
+        category="${shorthand#*:}"
+        # Normalize category (replace - with space)
+        category="${category//-/ }"
+    else
+        level="$shorthand"
+    fi
+
+    # Normalize level
+    level=$(echo "$level" | tr '[:upper:]' '[:lower:]')
+
+    # Build filter
+    local matches=()
+    while IFS='|' read -r number type nlevel ncategory nidentity ndesc; do
+        [[ -z "$number" ]] && continue
+
+        # Match level
+        if [[ -n "$level" ]] && [[ "$nlevel" != "$level" ]]; then
+            continue
+        fi
+
+        # Match category if specified
+        if [[ -n "$category" ]]; then
+            local norm_cat
+            norm_cat=$(echo "$ncategory" | tr '[:upper:]' '[:lower:]')
+            if [[ "$norm_cat" != *"$category"* ]]; then
+                continue
+            fi
+        fi
+
+        matches+=("$number")
+    done <<< "$TEST_NUMBERS"
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        error "No test number found matching '$shorthand'"
+        echo "  Run 'carcharodon numbers' to see available test numbers" >&2
+        return 1
+    fi
+
+    # Pick random from matches
+    local idx=$((RANDOM % ${#matches[@]}))
+    echo "${matches[$idx]}"
+}
+
+#######################################
+# Command: numbers
+#######################################
+cmd_numbers() {
+    local filter_level=""
+    local filter_category=""
+    local filter_region=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -l|--level)
+                filter_level="$2"
+                shift 2
+                ;;
+            -c|--category)
+                filter_category="$2"
+                shift 2
+                ;;
+            -r|--region)
+                filter_region="$2"
+                shift 2
+                ;;
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --quiet|-q)
+                QUIET_OUTPUT=true
+                shift
+                ;;
+            *)
+                error "Unknown option: $1"
+                echo "Usage: carcharodon numbers [--level <level>] [--category <cat>] [--region us|uk]" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    filter_level=$(echo "$filter_level" | tr '[:upper:]' '[:lower:]')
+    filter_category=$(echo "$filter_category" | tr '[:upper:]' '[:lower:]')
+    filter_region=$(echo "$filter_region" | tr '[:upper:]' '[:lower:]')
+
+    local json_arr="["
+    local first=true
+
+    if [[ "$JSON_OUTPUT" != "true" ]] && [[ "$QUIET_OUTPUT" != "true" ]]; then
+        printf "${BOLD}%-16s %-10s %-18s %-20s${NC}\n" "Number" "Level" "Category" "Identity"
+        printf "%-16s %-10s %-18s %-20s\n" "----------------" "----------" "------------------" "--------------------"
+    fi
+
+    while IFS='|' read -r number type level category identity desc; do
+        [[ -z "$number" ]] && continue
+
+        # Apply region filter
+        if [[ -n "$filter_region" ]]; then
+            if [[ "$filter_region" == "uk" ]] && [[ "$number" != +44* ]]; then
+                continue
+            fi
+            if [[ "$filter_region" == "us" ]] && [[ "$number" == +44* ]]; then
+                continue
+            fi
+        fi
+
+        # Apply level filter
+        if [[ -n "$filter_level" ]]; then
+            local norm_level
+            norm_level=$(echo "$level" | tr '[:upper:]' '[:lower:]')
+            if [[ "$norm_level" != "$filter_level" ]]; then
+                continue
+            fi
+        fi
+
+        # Apply category filter
+        if [[ -n "$filter_category" ]]; then
+            local norm_cat
+            norm_cat=$(echo "$category" | tr '[:upper:]' '[:lower:]')
+            if [[ "$norm_cat" != *"$filter_category"* ]]; then
+                continue
+            fi
+        fi
+
+        if [[ "$JSON_OUTPUT" == "true" ]]; then
+            [[ "$first" != "true" ]] && json_arr+=","
+            first=false
+            json_arr+=$(jq -n \
+                --arg num "$number" \
+                --arg type "$type" \
+                --arg level "$level" \
+                --arg cat "$category" \
+                --arg id "$identity" \
+                --arg desc "$desc" \
+                '{number: $num, type: $type, level: $level, category: $cat, identity: $id, description: $desc}')
+        elif [[ "$QUIET_OUTPUT" == "true" ]]; then
+            echo "$number"
+        else
+            local color
+            color=$(level_color "$level")
+            printf "%-16s ${color}%-10s${NC} %-18s %-20s\n" "$number" "${level:-—}" "${category:-—}" "${identity:-—}"
+        fi
+    done <<< "$TEST_NUMBERS"
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        json_arr+="]"
+        echo "$json_arr" | jq .
+    fi
+}
+
+#######################################
 # Command: call
 #######################################
 cmd_call() {
@@ -317,7 +568,7 @@ cmd_call() {
                 ;;
             *)
                 error "Unknown option: $1"
-                echo "Usage: carcharodon call -t <to> -f <from> [--cancel-after <ms>] [--wait]" >&2
+                echo "Usage: carcharodon call -t <to> -f <from|shorthand> [--cancel-after <ms>] [--wait]" >&2
                 exit 1
                 ;;
         esac
@@ -334,6 +585,15 @@ cmd_call() {
     fi
 
     validate_e164 "$to_number" "to number" || exit 1
+
+    # Resolve from_number shorthand if needed
+    if [[ ! "$from_number" =~ ^\+ ]]; then
+        local resolved
+        resolved=$(resolve_number_shorthand "$from_number") || exit 1
+        info "Using test number: $resolved (${from_number})"
+        from_number="$resolved"
+    fi
+
     validate_e164 "$from_number" "from number" || exit 1
 
     check_api_key
@@ -543,6 +803,7 @@ ${BOLD}COMMANDS:${NC}
     status      Get call status
     cancel      Cancel an active call
     timestamps  Get SIP timing information
+    numbers     List available test numbers
 
 ${BOLD}GLOBAL OPTIONS:${NC}
     --json      Output raw JSON
@@ -551,8 +812,13 @@ ${BOLD}GLOBAL OPTIONS:${NC}
     --version   Show version
 
 ${BOLD}EXAMPLES:${NC}
-    # Place a call
+    # Place a call with explicit number
     carcharodon call -t +12065551234 -f +18005551234
+
+    # Place a call using test number shorthand
+    carcharodon call -t +12065551234 -f spam
+    carcharodon call -t +12065551234 -f fraud
+    carcharodon call -t +12065551234 -f fraud:tax-scam
 
     # Place a call and wait for completion
     carcharodon call -t +12065551234 -f +18005551234 --wait
@@ -566,6 +832,20 @@ ${BOLD}EXAMPLES:${NC}
     # View SIP timestamps
     carcharodon timestamps -i abc123
 
+    # List test numbers
+    carcharodon numbers
+    carcharodon numbers --level fraud
+    carcharodon numbers --level spam --region uk
+    carcharodon numbers --category telemarketer
+
+${BOLD}TEST NUMBER SHORTHANDS:${NC}
+    ok              Random number with ok level
+    uncertain       Random number with uncertain level
+    spam            Random spam number
+    fraud           Random fraud number
+    fraud:tax-scam  Fraud number with specific category
+    spam:robocaller Spam number with specific category
+
 ${BOLD}ENVIRONMENT:${NC}
     CARCHARODON_API_KEY   API key for authentication (required)
     CARCHARODON_API_URL   API base URL (default: https://api.carcharodon.dev)
@@ -573,12 +853,17 @@ ${BOLD}ENVIRONMENT:${NC}
 
 ${BOLD}CALL OPTIONS:${NC}
     -t, --to <number>       Destination phone number (E.164 format)
-    -f, --from <number>     Caller ID to display (E.164 format)
+    -f, --from <number>     Caller ID - E.164 number or shorthand (spam, fraud, etc.)
     --cancel-after <ms>     Auto-cancel timeout in milliseconds (default: 35000)
     --wait                  Wait for call to complete before returning
 
 ${BOLD}STATUS/CANCEL/TIMESTAMPS OPTIONS:${NC}
     -i, --id <call_id>      Call ID to query
+
+${BOLD}NUMBERS OPTIONS:${NC}
+    -l, --level <level>     Filter by level (ok, uncertain, spam, fraud)
+    -c, --category <cat>    Filter by category (telemarketer, robocaller, etc.)
+    -r, --region <region>   Filter by region (us, uk)
 EOF
 }
 
@@ -609,6 +894,10 @@ main() {
         timestamps)
             shift
             cmd_timestamps "$@"
+            ;;
+        numbers)
+            shift
+            cmd_numbers "$@"
             ;;
         --help|-h|help)
             show_help

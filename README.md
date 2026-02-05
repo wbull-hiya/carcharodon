@@ -39,14 +39,57 @@ export CARCHARODON_API_URL="https://api.example.com"
 ### Place a Call
 
 ```bash
+# With explicit phone number
 carcharodon call -t +12065551234 -f +18005551234
+
+# Using test number shorthand
+carcharodon call -t +12065551234 -f spam
+carcharodon call -t +12065551234 -f fraud
+carcharodon call -t +12065551234 -f fraud:tax-scam
 ```
 
 Options:
 - `-t, --to` - Destination phone number (E.164 format, required)
-- `-f, --from` - Caller ID to display (E.164 format, required)
+- `-f, --from` - Caller ID: E.164 number or shorthand like `spam`, `fraud:tax-scam` (required)
 - `--cancel-after <ms>` - Auto-cancel timeout in milliseconds (default: 35000)
 - `--wait` - Wait for call to complete before returning
+
+### Test Number Shorthands
+
+Instead of specifying a full phone number for `--from`, use these shortcuts:
+
+| Shorthand | Description |
+|-----------|-------------|
+| `ok` | Random number with OK reputation |
+| `uncertain` | Random uncertain number |
+| `spam` | Random spam number |
+| `fraud` | Random fraud number |
+| `spam:telemarketer` | Spam telemarketer |
+| `spam:robocaller` | Spam robocaller |
+| `fraud:tax-scam` | Tax scam fraud |
+| `fraud:extortion` | Extortion fraud |
+| `fraud:tech-support-scam` | Tech support scam |
+
+### List Test Numbers
+
+```bash
+# List all test numbers
+carcharodon numbers
+
+# Filter by level
+carcharodon numbers --level fraud
+carcharodon numbers --level spam
+
+# Filter by category
+carcharodon numbers --category telemarketer
+
+# Filter by region
+carcharodon numbers --region uk
+carcharodon numbers --level spam --region us
+
+# Get just phone numbers (for scripting)
+carcharodon numbers --level fraud --quiet
+```
 
 ### Check Call Status
 
@@ -76,10 +119,13 @@ Examples:
 
 ```bash
 # Get just the call ID
-carcharodon call -t +12065551234 -f +18005551234 --quiet
+carcharodon call -t +12065551234 -f spam --quiet
 
 # Get full JSON response
 carcharodon status -i abc123 --json
+
+# Get list of fraud numbers for scripting
+carcharodon numbers --level fraud -q
 ```
 
 ## Shell Completions

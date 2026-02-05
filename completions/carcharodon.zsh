@@ -10,6 +10,7 @@ _carcharodon() {
         'status:Get call status'
         'cancel:Cancel an active call'
         'timestamps:Get SIP timing information'
+        'numbers:List available test numbers'
         'help:Show help information'
     )
 
@@ -20,6 +21,25 @@ _carcharodon() {
         '(-h --help)'{-h,--help}'[Show help]'
         '(-v --version)'{-v,--version}'[Show version]'
     )
+
+    local -a levels
+    levels=(ok uncertain spam fraud)
+
+    local -a shorthands
+    shorthands=(
+        'ok:Random OK number'
+        'uncertain:Random uncertain number'
+        'spam:Random spam number'
+        'fraud:Random fraud number'
+        'spam\:telemarketer:Spam telemarketer'
+        'spam\:robocaller:Spam robocaller'
+        'fraud\:tax-scam:Tax scam'
+        'fraud\:extortion:Extortion scam'
+        'fraud\:tech-support-scam:Tech support scam'
+    )
+
+    local -a categories
+    categories=(telemarketer robocaller survey nonprofit extortion 'tax-scam' 'tech-support-scam' 'scam-or-fraud')
 
     _arguments -C \
         '1:command:->command' \
@@ -35,7 +55,7 @@ _carcharodon() {
                 call)
                     _arguments \
                         '(-t --to)'{-t,--to}'[Destination phone number]:phone number:' \
-                        '(-f --from)'{-f,--from}'[Caller ID to display]:phone number:' \
+                        '(-f --from)'{-f,--from}'[Caller ID or shorthand]:from number:((${(kv)shorthands}))' \
                         '--cancel-after[Auto-cancel timeout in ms]:milliseconds:(10000 20000 30000 35000 60000)' \
                         '--wait[Wait for call to complete]' \
                         '--json[Output raw JSON]' \
@@ -56,6 +76,14 @@ _carcharodon() {
                 timestamps)
                     _arguments \
                         '(-i --id)'{-i,--id}'[Call ID]:call id:' \
+                        '--json[Output raw JSON]' \
+                        '(-q --quiet)'{-q,--quiet}'[Minimal output]'
+                    ;;
+                numbers)
+                    _arguments \
+                        '(-l --level)'{-l,--level}'[Filter by level]:level:(${levels})' \
+                        '(-c --category)'{-c,--category}'[Filter by category]:category:(${categories})' \
+                        '(-r --region)'{-r,--region}'[Filter by region]:region:(us uk)' \
                         '--json[Output raw JSON]' \
                         '(-q --quiet)'{-q,--quiet}'[Minimal output]'
                     ;;

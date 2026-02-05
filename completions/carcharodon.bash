@@ -5,8 +5,10 @@ _carcharodon() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="call status cancel timestamps help"
+    local commands="call status cancel timestamps numbers help"
     local global_opts="--json --quiet -q --help -h --version -v"
+    local levels="ok uncertain spam fraud"
+    local shorthands="ok uncertain spam fraud spam:telemarketer spam:robocaller spam:survey fraud:tax-scam fraud:extortion fraud:tech-support-scam"
 
     case "${prev}" in
         carcharodon)
@@ -21,16 +23,36 @@ _carcharodon() {
             COMPREPLY=($(compgen -W "-i --id --json --quiet -q" -- "${cur}"))
             return 0
             ;;
-        -t|--to|-f|--from)
+        numbers)
+            COMPREPLY=($(compgen -W "-l --level -c --category -r --region --json --quiet -q" -- "${cur}"))
+            return 0
+            ;;
+        -t|--to)
             # Phone number - no completion
+            return 0
+            ;;
+        -f|--from)
+            # Phone number or shorthand
+            COMPREPLY=($(compgen -W "${shorthands}" -- "${cur}"))
             return 0
             ;;
         -i|--id)
             # Call ID - no completion
             return 0
             ;;
+        -l|--level)
+            COMPREPLY=($(compgen -W "${levels}" -- "${cur}"))
+            return 0
+            ;;
+        -c|--category)
+            COMPREPLY=($(compgen -W "telemarketer robocaller survey nonprofit extortion tax-scam tech-support-scam scam-or-fraud" -- "${cur}"))
+            return 0
+            ;;
+        -r|--region)
+            COMPREPLY=($(compgen -W "us uk" -- "${cur}"))
+            return 0
+            ;;
         --cancel-after)
-            # Timeout value - suggest common values
             COMPREPLY=($(compgen -W "10000 20000 30000 35000 60000" -- "${cur}"))
             return 0
             ;;
@@ -40,7 +62,7 @@ _carcharodon() {
     local cmd=""
     for ((i=1; i < cword; i++)); do
         case "${words[i]}" in
-            call|status|cancel|timestamps)
+            call|status|cancel|timestamps|numbers)
                 cmd="${words[i]}"
                 break
                 ;;
@@ -53,6 +75,9 @@ _carcharodon() {
             ;;
         status|cancel|timestamps)
             COMPREPLY=($(compgen -W "-i --id --json --quiet -q" -- "${cur}"))
+            ;;
+        numbers)
+            COMPREPLY=($(compgen -W "-l --level -c --category -r --region --json --quiet -q" -- "${cur}"))
             ;;
         *)
             COMPREPLY=($(compgen -W "${commands} ${global_opts}" -- "${cur}"))
