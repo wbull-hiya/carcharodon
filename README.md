@@ -22,16 +22,14 @@ ln -s "$(pwd)/carcharodon" /usr/local/bin/carcharodon
 
 ## Configuration
 
-Set your API key as an environment variable:
+The CLI uses your system username to identify requests. Optionally configure:
 
 ```bash
-export CARCHARODON_API_KEY="your_api_key_here"
-```
+# Override user email (default: $USER@hiya.com)
+export CARCHARODON_USER="yourname@hiya.com"
 
-Optionally, configure a custom API URL:
-
-```bash
-export CARCHARODON_API_URL="https://api.example.com"
+# Override API URL (default: https://carcharodon.toolsv3.us-west-2.wtpgs.net)
+export CARCHARODON_API_URL="https://custom-api.example.com"
 ```
 
 ## Usage
@@ -165,8 +163,8 @@ autoload -Uz compinit && compinit
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CARCHARODON_API_KEY` | API key for authentication | (required) |
-| `CARCHARODON_API_URL` | API base URL | `https://api.carcharodon.dev` |
+| `CARCHARODON_USER` | User email for API requests | `$USER@hiya.com` |
+| `CARCHARODON_API_URL` | API base URL | `https://carcharodon.toolsv3.us-west-2.wtpgs.net` |
 | `NO_COLOR` | Disable colored output | (unset) |
 
 ## Dependencies

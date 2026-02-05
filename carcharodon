@@ -7,9 +7,9 @@
 
 set -euo pipefail
 
-VERSION="1.2.0"
-API_BASE="${CARCHARODON_API_URL:-https://api.carcharodon.dev}"
-API_KEY="${CARCHARODON_API_KEY:-}"
+VERSION="1.3.0"
+API_BASE="${CARCHARODON_API_URL:-https://carcharodon.toolsv3.us-west-2.wtpgs.net}"
+API_USER="${CARCHARODON_USER:-${USER}@hiya.com}"
 
 # Colors (disabled if not a terminal or NO_COLOR is set)
 if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
@@ -173,27 +173,16 @@ validate_e164() {
     fi
 }
 
-#######################################
-# Check API key is configured
-#######################################
-check_api_key() {
-    if [[ -z "$API_KEY" ]]; then
-        error "CARCHARODON_API_KEY environment variable is not set"
-        echo "  Export your API key: export CARCHARODON_API_KEY=your_key_here" >&2
-        exit 1
-    fi
-}
 
 #######################################
 # Make API request with retry logic
-# Usage: api_request METHOD ENDPOINT [DATA] [EXTRA_HEADERS...]
+# Usage: api_request METHOD ENDPOINT [DATA] [EXTRA_HEADER]
 #######################################
 api_request() {
     local method="$1"
     local endpoint="$2"
     local data="${3:-}"
-    shift 3 2>/dev/null || shift $#
-    local extra_headers=("$@")
+    local extra_header="${4:-}"
     local attempt=1
     local response
     local http_code
@@ -201,17 +190,17 @@ api_request() {
 
     while [[ $attempt -le $MAX_RETRIES ]]; do
         local curl_args=(
-            -s
+            -sk
             -w "\n%{http_code}"
             -X "$method"
-            -H "Authorization: Bearer $API_KEY"
+            -H "User: $API_USER"
             -H "Content-Type: application/json"
         )
 
-        # Add any extra headers
-        for header in "${extra_headers[@]}"; do
-            [[ -n "$header" ]] && curl_args+=(-H "$header")
-        done
+        # Add extra header if provided
+        if [[ -n "$extra_header" ]]; then
+            curl_args+=(-H "$extra_header")
+        fi
 
         if [[ -n "$data" ]]; then
             curl_args+=(-d "$data")
@@ -621,7 +610,6 @@ cmd_call() {
 
     validate_e164 "$from_number" "from number" || exit 1
 
-    check_api_key
 
     local payload
     payload=$(jq -n \
@@ -631,13 +619,13 @@ cmd_call() {
         '{to: $to, from: $from, cancel_after: $cancel}')
 
     # Build extra headers
-    local extra_headers=()
+    local extra_headers=""
     if [[ -n "$trunk" ]]; then
-        extra_headers+=("Sip-Trunk: $trunk")
+        extra_headers="Sip-Trunk: $trunk"
     fi
 
     local response
-    response=$(api_request "POST" "/call" "$payload" "${extra_headers[@]}") || exit 1
+    response=$(api_request "POST" "/call" "$payload" "$extra_headers") || exit 1
 
     local call_id
     call_id=$(echo "$response" | jq -r '.id // .callId // empty')
@@ -698,7 +686,6 @@ cmd_status() {
         exit 1
     fi
 
-    check_api_key
 
     local response
     response=$(api_request "GET" "/calls/$call_id") || exit 1
@@ -706,20 +693,25 @@ cmd_status() {
     if [[ "$JSON_OUTPUT" == "true" ]]; then
         echo "$response"
     elif [[ "$QUIET_OUTPUT" == "true" ]]; then
-        echo "$response" | jq -r '.status'
+        # Get latest status code
+        echo "$response" | jq -r '[.messages[] | select(.status != null) | .status] | last // "unknown"'
     else
-        local status to from duration
-        status=$(echo "$response" | jq -r '.status // "unknown"')
-        to=$(echo "$response" | jq -r '.to // "N/A"')
-        from=$(echo "$response" | jq -r '.from // "N/A"')
-        duration=$(echo "$response" | jq -r '.duration // "N/A"')
+        local msg_count last_status first_ts last_ts from_hdr to_hdr
+        msg_count=$(echo "$response" | jq -r '.messages | length')
+        last_status=$(echo "$response" | jq -r '[.messages[] | select(.status != null) | .status] | last // "N/A"')
+        first_ts=$(echo "$response" | jq -r '.messages | sort_by(.timestamp) | first | .timestamp // "N/A"')
+        last_ts=$(echo "$response" | jq -r '.messages | sort_by(.timestamp) | last | .timestamp // "N/A"')
+        from_hdr=$(echo "$response" | jq -r '.messages[0].headers.From // "N/A"' | sed 's/.*<sip:\([^@>]*\).*/\1/')
+        to_hdr=$(echo "$response" | jq -r '.messages[0].headers.To // "N/A"' | sed 's/.*<sip:\([^@>]*\).*/\1/' | sed 's/.*\*//')
 
         echo -e "${BOLD}Call Status${NC}"
-        echo "  ID:       $call_id"
-        echo "  Status:   $status"
-        echo "  To:       $to"
-        echo "  From:     $from"
-        echo "  Duration: ${duration}s"
+        echo "  ID:         $call_id"
+        echo "  Last Code:  $last_status"
+        echo "  From:       $from_hdr"
+        echo "  To:         $to_hdr"
+        echo "  Messages:   $msg_count"
+        echo "  Started:    $first_ts"
+        echo "  Last:       $last_ts"
     fi
 }
 
@@ -756,7 +748,6 @@ cmd_cancel() {
         exit 1
     fi
 
-    check_api_key
 
     local response
     response=$(api_request "DELETE" "/calls/$call_id") || exit 1
@@ -804,7 +795,6 @@ cmd_timestamps() {
         exit 1
     fi
 
-    check_api_key
 
     local response
     response=$(api_request "GET" "/calls/$call_id/timestamps") || exit 1
@@ -812,11 +802,15 @@ cmd_timestamps() {
     if [[ "$JSON_OUTPUT" == "true" ]]; then
         echo "$response"
     elif [[ "$QUIET_OUTPUT" == "true" ]]; then
-        echo "$response" | jq -r 'keys | .[]'
+        echo "$response" | jq -r '.callTimestamps | to_entries[] | "\(.key): \(.value)"'
     else
         echo -e "${BOLD}SIP Timestamps for Call $call_id${NC}"
         echo
-        format_timestamps "$response"
+        printf "${BOLD}%-20s %-30s${NC}\n" "Event" "Timestamp"
+        printf "%-20s %-30s\n" "--------------------" "------------------------------"
+        echo "$response" | jq -r '.callTimestamps | to_entries[] | "\(.key)\t\(.value // "—")"' | while IFS=$'\t' read -r key value; do
+            printf "%-20s %-30s\n" "$key" "$value"
+        done
     fi
 }
 
@@ -882,8 +876,8 @@ ${BOLD}TEST NUMBER SHORTHANDS:${NC}
     spam:robocaller Spam number with specific category
 
 ${BOLD}ENVIRONMENT:${NC}
-    CARCHARODON_API_KEY   API key for authentication (required)
-    CARCHARODON_API_URL   API base URL (default: https://api.carcharodon.dev)
+    CARCHARODON_USER      User email for API (default: \$USER@hiya.com)
+    CARCHARODON_API_URL   API base URL (default: https://carcharodon.toolsv3.us-west-2.wtpgs.net)
     NO_COLOR              Disable colored output
 
 ${BOLD}CALL OPTIONS:${NC}
