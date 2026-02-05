@@ -1,0 +1,627 @@
+#!/usr/bin/env bash
+#
+# carcharodon - CLI tool for the Carcharodon spoofed call API
+#
+# Usage: carcharodon <command> [options]
+#
+
+set -euo pipefail
+
+VERSION="1.0.0"
+API_BASE="${CARCHARODON_API_URL:-https://api.carcharodon.dev}"
+API_KEY="${CARCHARODON_API_KEY:-}"
+
+# Colors (disabled if not a terminal or NO_COLOR is set)
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    BOLD=''
+    NC=''
+fi
+
+# Output flags
+JSON_OUTPUT=false
+QUIET_OUTPUT=false
+
+# Retry settings
+MAX_RETRIES=3
+RETRY_DELAY=2
+
+#######################################
+# Print error message to stderr
+#######################################
+error() {
+    echo -e "${RED}error:${NC} $*" >&2
+}
+
+#######################################
+# Print warning message to stderr
+#######################################
+warn() {
+    if [[ "$QUIET_OUTPUT" == "false" ]]; then
+        echo -e "${YELLOW}warning:${NC} $*" >&2
+    fi
+}
+
+#######################################
+# Print success message
+#######################################
+success() {
+    if [[ "$QUIET_OUTPUT" == "false" ]]; then
+        echo -e "${GREEN}✓${NC} $*"
+    fi
+}
+
+#######################################
+# Print info message
+#######################################
+info() {
+    if [[ "$QUIET_OUTPUT" == "false" ]]; then
+        echo -e "${BLUE}→${NC} $*"
+    fi
+}
+
+#######################################
+# Check for required dependencies
+#######################################
+check_dependencies() {
+    local missing=()
+
+    if ! command -v curl &>/dev/null; then
+        missing+=("curl")
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        missing+=("jq")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing required dependencies: ${missing[*]}"
+        echo "Install with: brew install ${missing[*]}" >&2
+        exit 1
+    fi
+}
+
+#######################################
+# Validate E.164 phone number format
+#######################################
+validate_e164() {
+    local number="$1"
+    local label="$2"
+
+    if [[ ! "$number" =~ ^\+[1-9][0-9]{6,14}$ ]]; then
+        error "Invalid $label: '$number'"
+        echo "  Phone numbers must be in E.164 format (e.g., +12065551234)" >&2
+        return 1
+    fi
+}
+
+#######################################
+# Check API key is configured
+#######################################
+check_api_key() {
+    if [[ -z "$API_KEY" ]]; then
+        error "CARCHARODON_API_KEY environment variable is not set"
+        echo "  Export your API key: export CARCHARODON_API_KEY=your_key_here" >&2
+        exit 1
+    fi
+}
+
+#######################################
+# Make API request with retry logic
+#######################################
+api_request() {
+    local method="$1"
+    local endpoint="$2"
+    local data="${3:-}"
+    local attempt=1
+    local response
+    local http_code
+    local body
+
+    while [[ $attempt -le $MAX_RETRIES ]]; do
+        local curl_args=(
+            -s
+            -w "\n%{http_code}"
+            -X "$method"
+            -H "Authorization: Bearer $API_KEY"
+            -H "Content-Type: application/json"
+        )
+
+        if [[ -n "$data" ]]; then
+            curl_args+=(-d "$data")
+        fi
+
+        response=$(curl "${curl_args[@]}" "${API_BASE}${endpoint}" 2>/dev/null) || {
+            if [[ $attempt -lt $MAX_RETRIES ]]; then
+                warn "Request failed, retrying in ${RETRY_DELAY}s... (attempt $attempt/$MAX_RETRIES)"
+                sleep "$RETRY_DELAY"
+                ((attempt++))
+                continue
+            else
+                error "Request failed after $MAX_RETRIES attempts"
+                return 1
+            fi
+        }
+
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+
+        case "$http_code" in
+            2*)
+                echo "$body"
+                return 0
+                ;;
+            401)
+                error "Authentication failed - check your API key"
+                return 1
+                ;;
+            403)
+                error "Access forbidden - insufficient permissions"
+                return 1
+                ;;
+            404)
+                error "Resource not found"
+                return 1
+                ;;
+            422)
+                local msg
+                msg=$(echo "$body" | jq -r '.message // .error // "Validation error"' 2>/dev/null)
+                error "Validation error: $msg"
+                return 1
+                ;;
+            429)
+                error "Rate limit exceeded - please wait before retrying"
+                return 1
+                ;;
+            500)
+                error "Server error - please try again later"
+                return 1
+                ;;
+            503)
+                if [[ $attempt -lt $MAX_RETRIES ]]; then
+                    warn "Service unavailable, retrying in ${RETRY_DELAY}s... (attempt $attempt/$MAX_RETRIES)"
+                    sleep "$RETRY_DELAY"
+                    ((attempt++))
+                    continue
+                else
+                    error "Service unavailable after $MAX_RETRIES attempts"
+                    return 1
+                fi
+                ;;
+            *)
+                error "Unexpected response (HTTP $http_code)"
+                if [[ -n "$body" ]]; then
+                    echo "$body" >&2
+                fi
+                return 1
+                ;;
+        esac
+    done
+}
+
+#######################################
+# Format timestamp table
+#######################################
+format_timestamps() {
+    local json="$1"
+
+    printf "${BOLD}%-25s %-30s${NC}\n" "Event" "Timestamp"
+    printf "%-25s %-30s\n" "-------------------------" "------------------------------"
+
+    echo "$json" | jq -r '
+        to_entries | .[] |
+        "\(.key)\t\(.value)"
+    ' | while IFS=$'\t' read -r key value; do
+        printf "%-25s %-30s\n" "$key" "$value"
+    done
+}
+
+#######################################
+# Poll call status until complete
+#######################################
+wait_for_call() {
+    local call_id="$1"
+    local timeout="${2:-120}"
+    local start_time
+    start_time=$(date +%s)
+
+    info "Waiting for call to complete..."
+
+    while true; do
+        local elapsed
+        elapsed=$(($(date +%s) - start_time))
+
+        if [[ $elapsed -ge $timeout ]]; then
+            warn "Timeout waiting for call completion"
+            return 1
+        fi
+
+        local response
+        response=$(api_request "GET" "/calls/$call_id") || return 1
+
+        local status
+        status=$(echo "$response" | jq -r '.status // "unknown"')
+
+        case "$status" in
+            completed|answered)
+                if [[ "$JSON_OUTPUT" == "true" ]]; then
+                    echo "$response"
+                else
+                    success "Call completed"
+                    echo "$response" | jq -r '"  Status: \(.status)\n  Duration: \(.duration // "N/A")s"'
+                fi
+                return 0
+                ;;
+            failed|canceled|cancelled)
+                if [[ "$JSON_OUTPUT" == "true" ]]; then
+                    echo "$response"
+                else
+                    error "Call $status"
+                    local reason
+                    reason=$(echo "$response" | jq -r '.reason // .error // "Unknown reason"')
+                    echo "  Reason: $reason" >&2
+                fi
+                return 1
+                ;;
+            *)
+                sleep 2
+                ;;
+        esac
+    done
+}
+
+#######################################
+# Command: call
+#######################################
+cmd_call() {
+    local to_number=""
+    local from_number=""
+    local cancel_after="35000"
+    local wait_for_complete=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -t|--to)
+                to_number="$2"
+                shift 2
+                ;;
+            -f|--from)
+                from_number="$2"
+                shift 2
+                ;;
+            --cancel-after)
+                cancel_after="$2"
+                shift 2
+                ;;
+            --wait)
+                wait_for_complete=true
+                shift
+                ;;
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --quiet|-q)
+                QUIET_OUTPUT=true
+                shift
+                ;;
+            *)
+                error "Unknown option: $1"
+                echo "Usage: carcharodon call -t <to> -f <from> [--cancel-after <ms>] [--wait]" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z "$to_number" ]]; then
+        error "Missing required option: -t/--to"
+        exit 1
+    fi
+
+    if [[ -z "$from_number" ]]; then
+        error "Missing required option: -f/--from"
+        exit 1
+    fi
+
+    validate_e164 "$to_number" "to number" || exit 1
+    validate_e164 "$from_number" "from number" || exit 1
+
+    check_api_key
+
+    local payload
+    payload=$(jq -n \
+        --arg to "$to_number" \
+        --arg from "$from_number" \
+        --argjson cancel "$cancel_after" \
+        '{to: $to, from: $from, cancelAfter: $cancel}')
+
+    local response
+    response=$(api_request "POST" "/call" "$payload") || exit 1
+
+    local call_id
+    call_id=$(echo "$response" | jq -r '.id // .callId // empty')
+
+    if [[ -z "$call_id" ]]; then
+        error "Failed to get call ID from response"
+        echo "$response" >&2
+        exit 1
+    fi
+
+    if [[ "$QUIET_OUTPUT" == "true" ]]; then
+        echo "$call_id"
+    elif [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$response"
+    else
+        success "Call initiated"
+        echo "  Call ID: $call_id"
+        echo "  To: $to_number"
+        echo "  From: $from_number"
+    fi
+
+    if [[ "$wait_for_complete" == "true" ]]; then
+        wait_for_call "$call_id"
+    fi
+}
+
+#######################################
+# Command: status
+#######################################
+cmd_status() {
+    local call_id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i|--id)
+                call_id="$2"
+                shift 2
+                ;;
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --quiet|-q)
+                QUIET_OUTPUT=true
+                shift
+                ;;
+            *)
+                error "Unknown option: $1"
+                echo "Usage: carcharodon status -i <call_id>" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z "$call_id" ]]; then
+        error "Missing required option: -i/--id"
+        exit 1
+    fi
+
+    check_api_key
+
+    local response
+    response=$(api_request "GET" "/calls/$call_id") || exit 1
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$response"
+    elif [[ "$QUIET_OUTPUT" == "true" ]]; then
+        echo "$response" | jq -r '.status'
+    else
+        local status to from duration
+        status=$(echo "$response" | jq -r '.status // "unknown"')
+        to=$(echo "$response" | jq -r '.to // "N/A"')
+        from=$(echo "$response" | jq -r '.from // "N/A"')
+        duration=$(echo "$response" | jq -r '.duration // "N/A"')
+
+        echo -e "${BOLD}Call Status${NC}"
+        echo "  ID:       $call_id"
+        echo "  Status:   $status"
+        echo "  To:       $to"
+        echo "  From:     $from"
+        echo "  Duration: ${duration}s"
+    fi
+}
+
+#######################################
+# Command: cancel
+#######################################
+cmd_cancel() {
+    local call_id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i|--id)
+                call_id="$2"
+                shift 2
+                ;;
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --quiet|-q)
+                QUIET_OUTPUT=true
+                shift
+                ;;
+            *)
+                error "Unknown option: $1"
+                echo "Usage: carcharodon cancel -i <call_id>" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z "$call_id" ]]; then
+        error "Missing required option: -i/--id"
+        exit 1
+    fi
+
+    check_api_key
+
+    local response
+    response=$(api_request "DELETE" "/calls/$call_id") || exit 1
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$response"
+    elif [[ "$QUIET_OUTPUT" == "true" ]]; then
+        echo "cancelled"
+    else
+        success "Call cancelled"
+        echo "  Call ID: $call_id"
+    fi
+}
+
+#######################################
+# Command: timestamps
+#######################################
+cmd_timestamps() {
+    local call_id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i|--id)
+                call_id="$2"
+                shift 2
+                ;;
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --quiet|-q)
+                QUIET_OUTPUT=true
+                shift
+                ;;
+            *)
+                error "Unknown option: $1"
+                echo "Usage: carcharodon timestamps -i <call_id>" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z "$call_id" ]]; then
+        error "Missing required option: -i/--id"
+        exit 1
+    fi
+
+    check_api_key
+
+    local response
+    response=$(api_request "GET" "/calls/$call_id/timestamps") || exit 1
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$response"
+    elif [[ "$QUIET_OUTPUT" == "true" ]]; then
+        echo "$response" | jq -r 'keys | .[]'
+    else
+        echo -e "${BOLD}SIP Timestamps for Call $call_id${NC}"
+        echo
+        format_timestamps "$response"
+    fi
+}
+
+#######################################
+# Show help
+#######################################
+show_help() {
+    cat <<EOF
+${BOLD}carcharodon${NC} - CLI tool for the Carcharodon spoofed call API
+
+${BOLD}USAGE:${NC}
+    carcharodon <command> [options]
+
+${BOLD}COMMANDS:${NC}
+    call        Place a spoofed call
+    status      Get call status
+    cancel      Cancel an active call
+    timestamps  Get SIP timing information
+
+${BOLD}GLOBAL OPTIONS:${NC}
+    --json      Output raw JSON
+    --quiet, -q Minimal output
+    --help, -h  Show this help
+    --version   Show version
+
+${BOLD}EXAMPLES:${NC}
+    # Place a call
+    carcharodon call -t +12065551234 -f +18005551234
+
+    # Place a call and wait for completion
+    carcharodon call -t +12065551234 -f +18005551234 --wait
+
+    # Get call status as JSON
+    carcharodon status -i abc123 --json
+
+    # Cancel an active call
+    carcharodon cancel -i abc123
+
+    # View SIP timestamps
+    carcharodon timestamps -i abc123
+
+${BOLD}ENVIRONMENT:${NC}
+    CARCHARODON_API_KEY   API key for authentication (required)
+    CARCHARODON_API_URL   API base URL (default: https://api.carcharodon.dev)
+    NO_COLOR              Disable colored output
+
+${BOLD}CALL OPTIONS:${NC}
+    -t, --to <number>       Destination phone number (E.164 format)
+    -f, --from <number>     Caller ID to display (E.164 format)
+    --cancel-after <ms>     Auto-cancel timeout in milliseconds (default: 35000)
+    --wait                  Wait for call to complete before returning
+
+${BOLD}STATUS/CANCEL/TIMESTAMPS OPTIONS:${NC}
+    -i, --id <call_id>      Call ID to query
+EOF
+}
+
+#######################################
+# Main entry point
+#######################################
+main() {
+    if [[ $# -eq 0 ]]; then
+        show_help
+        exit 0
+    fi
+
+    check_dependencies
+
+    case "$1" in
+        call)
+            shift
+            cmd_call "$@"
+            ;;
+        status)
+            shift
+            cmd_status "$@"
+            ;;
+        cancel)
+            shift
+            cmd_cancel "$@"
+            ;;
+        timestamps)
+            shift
+            cmd_timestamps "$@"
+            ;;
+        --help|-h|help)
+            show_help
+            ;;
+        --version|-v)
+            echo "carcharodon version $VERSION"
+            ;;
+        *)
+            error "Unknown command: $1"
+            echo "Run 'carcharodon --help' for usage" >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
